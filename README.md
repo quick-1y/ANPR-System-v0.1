@@ -1,6 +1,29 @@
 # ANPR-System-v0.1
 
-`pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu`
-`pip install torch torchvision ultralytics opencv-python pandas matplotlib seaborn python-Levenshtein`
+Десктопное приложение для детекции и распознавания автомобильных номеров с локальной базой событий и настраиваемыми каналами.
 
-`py detector.py --source "D:\Users\qu1ck1y\Desktop\srnz\demo.mp4"`
+## Установка
+
+```bash
+pip install -r requirements.txt
+```
+
+> Для CPU-окружения PyTorch можно установить через официальный индекс: `pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu`.
+
+## Быстрый старт
+
+```bash
+python app.py
+```
+
+- Вкладка **«Монитор»** — выбор сетки (1×1, 1×2, 2×2, 2×3, 3×3), просмотр каналов и последнее событие.
+- Вкладка **«События»** — таблица последних распознаваний с фильтрами по дате, каналу и списку номеров.
+- Вкладка **«Поиск»** — поиск по номеру и интервалу времени.
+- Вкладка **«Настройки»** — управление каналами (локальные камеры или RTSP/файлы), сетка и путь к локальной базе (`settings.json`).
+
+## Файлы
+
+- `settings.json` — хранит конфигурацию каналов и сетки.
+- `data/events.db` — создаётся автоматически, хранит последние 100+ событий распознавания.
+- `detector.py` — пайплайн детекции (YOLOv8) и распознавания (CRNN).
+- `app.py` — GUI на PyQt5, управление каналами, поиск и просмотр событий.
