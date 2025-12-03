@@ -95,10 +95,12 @@ class CRNN(nn.Module):
 
 class YOLODetector:
     """Обертка для модели детекции YOLO."""
+
     def __init__(self, model_path: str, device: torch.device):
         self.model = YOLO(model_path)
         self.model.to(device)
         self.device = device
+        self._tracking_supported = True
         print("✅ Детектор YOLO успешно загружен.")
 
     def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
@@ -108,28 +110,45 @@ class YOLODetector:
         for det in detections[0].boxes.data:
             x1, y1, x2, y2, conf, _ = det.cpu().numpy()
             if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
-                results.append({ "bbox": [int(x1), int(y1), int(x2), int(y2)], "confidence": float(conf) })
+                results.append({"bbox": [int(x1), int(y1), int(x2), int(y2)], "confidence": float(conf)})
         return results
-        
-    def track(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-        """Отслеживает номера в ПОСЛЕДОВАТЕЛЬНОСТИ кадров (для видео)."""
+
+    def _track_internal(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         detections = self.model.track(frame, persist=True, verbose=False, device=self.device)
-        results = []
+        results: List[Dict[str, Any]] = []
         if detections[0].boxes.id is None:
             return results
-            
+
         track_ids = detections[0].boxes.id.int().cpu().tolist()
         boxes = detections[0].boxes.xyxy.cpu().numpy()
         confs = detections[0].boxes.conf.cpu().numpy()
 
         for box, track_id, conf in zip(boxes, track_ids, confs):
-             if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
-                results.append({
-                    "bbox": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
-                    "confidence": float(conf),
-                    "track_id": track_id
-                })
+            if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
+                results.append(
+                    {
+                        "bbox": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
+                        "confidence": float(conf),
+                        "track_id": track_id,
+                    }
+                )
         return results
+
+    def track(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """Отслеживает номера в последовательности кадров (для видео) с откатом к детекции."""
+        if not self._tracking_supported:
+            return self.detect(frame)
+
+        try:
+            return self._track_internal(frame)
+        except ModuleNotFoundError:
+            # Отсутствующие зависимости трекера (например, lap/byte-track) ломают поток при повторном
+            # запуске. Запоминаем, что трекинг недоступен, и продолжаем с обычной детекцией.
+            self._tracking_supported = False
+            return self.detect(frame)
+    # Ниже оставлены только методы с откатом на детекцию, чтобы избежать падений из-за
+    # необязательных зависимостей трекера.
+
 
 class CRNNRecognizer:
     """Обертка для квантованной модели распознавания CRNN."""
