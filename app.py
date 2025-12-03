@@ -126,9 +126,11 @@ class ChannelWorker(QtCore.QThread):
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width, channel = rgb_frame.shape
                 bytes_per_line = 3 * width
+                # Копируем буфер, чтобы предотвратить обращение Qt к уже освобожденной памяти
+                # во время перерисовок окна.
                 q_image = QtGui.QImage(
                     rgb_frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
-                )
+                ).copy()
                 self.frame_ready.emit(self.channel_conf.get("name", "Канал"), q_image)
 
             capture.release()
