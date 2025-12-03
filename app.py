@@ -1,6 +1,6 @@
 import sys
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -70,7 +70,7 @@ class ChannelWorker(QtCore.QThread):
                 for res in results:
                     if res.get("text"):
                         event = {
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                             "channel": self.channel_conf.get("name", "Канал"),
                             "plate": res["text"],
                             "confidence": res.get("confidence", 0.0),
