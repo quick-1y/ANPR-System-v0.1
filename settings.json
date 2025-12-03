@@ -1,0 +1,17 @@
+{
+  "grid": "2x2",
+  "channels": [
+    {
+      "id": 1,
+      "name": "Канал 1",
+      "source": "0"
+    }
+  ],
+  "storage": {
+    "events_db": "data/events.db"
+  },
+  "tracking": {
+    "best_shots": 3,
+    "cooldown_seconds": 5
+  }
+}
