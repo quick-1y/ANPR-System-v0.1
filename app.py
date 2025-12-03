@@ -1,4 +1,5 @@
 import sys
+import warnings
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -8,6 +9,18 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from detector import ANPR_Pipeline, CRNNRecognizer, YOLODetector, Config as ModelConfig
 from settings_manager import SettingsManager
 from storage import EventDatabase
+
+# Silence noisy quantization warnings emitted by torch on repeated startups.
+warnings.filterwarnings(
+    "ignore",
+    message="Please use quant_min and quant_max to specify the range for observers.",
+    module="torch.ao.quantization.observer",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="must run observer before calling calculate_qparams",
+    module="torch.ao.quantization.observer",
+)
 
 
 class ChannelWorker(QtCore.QThread):
@@ -169,6 +182,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 label.setAlignment(QtCore.Qt.AlignCenter)
                 label.setStyleSheet("background-color: #1c1c1c; color: #ccc; border: 1px solid #444;")
                 label.setMinimumSize(200, 160)
+                label.setScaledContents(True)
+                label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
                 if index < len(channels):
                     channel_name = channels[index].get("name", f"Канал {index+1}")
                     label.setText(channel_name)
