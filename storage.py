@@ -1,7 +1,9 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Sequence
+
+import aiosqlite
 
 from logging_manager import get_logger
 
@@ -42,7 +44,7 @@ class EventDatabase:
         source: str = "",
         timestamp: Optional[str] = None,
     ) -> int:
-        ts = timestamp or datetime.utcnow().isoformat()
+        ts = timestamp or datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO events (timestamp, channel, plate, confidence, source) VALUES (?, ?, ?, ?, ?)",
@@ -125,3 +127,57 @@ class EventDatabase:
         with self._connect() as conn:
             cursor = conn.execute("SELECT DISTINCT channel FROM events ORDER BY channel")
             return [row[0] for row in cursor.fetchall()]
+
+
+class AsyncEventDatabase:
+    """Асинхронный доступ к SQLite для фоновых потоков распознавания."""
+
+    def __init__(self, db_path: str = "data/events.db") -> None:
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._initialized = False
+        self.logger = get_logger(__name__)
+
+    async def _ensure_schema(self) -> None:
+        if self._initialized:
+            return
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    plate TEXT NOT NULL,
+                    confidence REAL,
+                    source TEXT
+                )
+                """
+            )
+            await conn.commit()
+        self._initialized = True
+
+    async def insert_event_async(
+        self,
+        channel: str,
+        plate: str,
+        confidence: float = 0.0,
+        source: str = "",
+        timestamp: Optional[str] = None,
+    ) -> int:
+        await self._ensure_schema()
+        ts = timestamp or datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                "INSERT INTO events (timestamp, channel, plate, confidence, source) VALUES (?, ?, ?, ?, ?)",
+                (ts, channel, plate, confidence, source),
+            )
+            await conn.commit()
+            self.logger.info(
+                "[async] Event saved: %s (%s, conf=%.2f, src=%s)",
+                plate,
+                channel,
+                confidence or 0.0,
+                source,
+            )
+            return cursor.lastrowid

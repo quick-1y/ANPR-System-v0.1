@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -6,7 +7,7 @@ from PyQt5 import QtCore, QtGui
 
 from detector import ANPR_Pipeline, CRNNRecognizer, YOLODetector, Config as ModelConfig
 from logging_manager import get_logger
-from storage import EventDatabase
+from storage import AsyncEventDatabase
 
 logger = get_logger(__name__)
 
@@ -54,72 +55,80 @@ class ChannelWorker(QtCore.QThread):
             detector,
         )
 
+    async def _process_events(
+        self, storage: AsyncEventDatabase, source: str, results: list[dict], channel_name: str
+    ) -> None:
+        for res in results:
+            if res.get("unreadable"):
+                logger.debug(
+                    "Канал %s: номер помечен как нечитаемый (confidence=%.2f)",
+                    channel_name,
+                    res.get("confidence", 0.0),
+                )
+                continue
+            if res.get("text"):
+                event = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "channel": channel_name,
+                    "plate": res.get("text", ""),
+                    "confidence": res.get("confidence", 0.0),
+                    "source": source,
+                }
+                event["id"] = await storage.insert_event_async(
+                    channel=event["channel"],
+                    plate=event["plate"],
+                    confidence=event["confidence"],
+                    source=event["source"],
+                    timestamp=event["timestamp"],
+                )
+                self.event_ready.emit(event)
+                logger.info(
+                    "Канал %s: зафиксирован номер %s (conf=%.2f, track=%s)",
+                    event["channel"],
+                    event["plate"],
+                    event["confidence"],
+                    res.get("track_id", "-"),
+                )
+
+    async def _loop(self) -> None:
+        pipeline, detector = await asyncio.to_thread(self._build_pipeline)
+        storage = AsyncEventDatabase(self.db_path)
+
+        source = str(self.channel_conf.get("source", "0"))
+        capture = await asyncio.to_thread(self._open_capture, source)
+        if capture is None:
+            self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Нет сигнала")
+            logger.warning("Не удалось открыть источник %s для канала %s", source, self.channel_conf)
+            return
+
+        channel_name = self.channel_conf.get("name", "Канал")
+        logger.info("Канал %s запущен (источник=%s)", channel_name, source)
+        while self._running:
+            ret, frame = await asyncio.to_thread(capture.read)
+            if not ret:
+                self.status_ready.emit(channel_name, "Поток остановлен")
+                logger.warning("Поток остановлен для канала %s", channel_name)
+                break
+
+            detections = await asyncio.to_thread(detector.track, frame)
+            results = await asyncio.to_thread(pipeline.process_frame, frame, detections)
+            await self._process_events(storage, source, results, channel_name)
+
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, channel = rgb_frame.shape
+            bytes_per_line = 3 * width
+            # Копируем буфер, чтобы предотвратить обращение Qt к уже освобожденной памяти
+            # во время перерисовок окна.
+            q_image = QtGui.QImage(
+                rgb_frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
+            ).copy()
+            self.frame_ready.emit(channel_name, q_image)
+
+        capture.release()
+
     def run(self) -> None:
         try:
-            pipeline, detector = self._build_pipeline()
-            storage = EventDatabase(self.db_path)
-
-            source = str(self.channel_conf.get("source", "0"))
-            capture = self._open_capture(source)
-            if capture is None:
-                self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Нет сигнала")
-                logger.warning("Не удалось открыть источник %s для канала %s", source, self.channel_conf)
-                return
-
-            logger.info("Канал %s запущен (источник=%s)", self.channel_conf.get("name", "Канал"), source)
-            while self._running:
-                ret, frame = capture.read()
-                if not ret:
-                    self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Поток остановлен")
-                    logger.warning("Поток остановлен для канала %s", self.channel_conf.get("name", "Канал"))
-                    break
-
-                detections = detector.track(frame)
-                results = pipeline.process_frame(frame, detections)
-
-                for res in results:
-                    if res.get("unreadable"):
-                        logger.debug(
-                            "Канал %s: номер помечен как нечитаемый (confidence=%.2f)",
-                            self.channel_conf.get("name", "Канал"),
-                            res.get("confidence", 0.0),
-                        )
-                        continue
-                    if res.get("text"):
-                        event = {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "channel": self.channel_conf.get("name", "Канал"),
-                            "plate": res.get("text", ""),
-                            "confidence": res.get("confidence", 0.0),
-                            "source": source,
-                        }
-                        event["id"] = storage.insert_event(
-                            channel=event["channel"],
-                            plate=event["plate"],
-                            confidence=event["confidence"],
-                            source=event["source"],
-                            timestamp=event["timestamp"],
-                        )
-                        self.event_ready.emit(event)
-                        logger.info(
-                            "Канал %s: зафиксирован номер %s (conf=%.2f, track=%s)",
-                            event["channel"],
-                            event["plate"],
-                            event["confidence"],
-                            res.get("track_id", "-"),
-                        )
-
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                height, width, channel = rgb_frame.shape
-                bytes_per_line = 3 * width
-                # Копируем буфер, чтобы предотвратить обращение Qt к уже освобожденной памяти
-                # во время перерисовок окна.
-                q_image = QtGui.QImage(
-                    rgb_frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
-                ).copy()
-                self.frame_ready.emit(self.channel_conf.get("name", "Канал"), q_image)
-
-            capture.release()
+            asyncio.run(self._loop())
         except Exception as exc:  # noqa: BLE001
             self.status_ready.emit(self.channel_conf.get("name", "Канал"), f"Ошибка: {exc}")
             logger.exception("Канал %s аварийно остановлен", self.channel_conf.get("name", "Канал"))

@@ -4,3 +4,4 @@ torchaudio==2.8.0
 ultralytics
 opencv-python
 PyQt5
+aiosqlite
