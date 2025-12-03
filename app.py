@@ -1,7 +1,7 @@
 import sys
 import warnings
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -34,21 +34,30 @@ class ChannelWorker(QtCore.QThread):
         self.db_path = db_path
         self._running = True
 
+    def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
+        capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
+        if not capture.isOpened():
+            return None
+        return capture
+
+    def _build_pipeline(self) -> Tuple[ANPR_Pipeline, YOLODetector]:
+        detector = YOLODetector(ModelConfig.YOLO_MODEL_PATH, ModelConfig.DEVICE)
+        recognizer = CRNNRecognizer(ModelConfig.OCR_MODEL_PATH, ModelConfig.DEVICE)
+        return ANPR_Pipeline(recognizer), detector
+
     def run(self) -> None:
         try:
-            detector = YOLODetector(ModelConfig.YOLO_MODEL_PATH, ModelConfig.DEVICE)
-            recognizer = CRNNRecognizer(ModelConfig.OCR_MODEL_PATH, ModelConfig.DEVICE)
-            pipeline = ANPR_Pipeline(recognizer)
+            pipeline, detector = self._build_pipeline()
             storage = EventDatabase(self.db_path)
 
             source = str(self.channel_conf.get("source", "0"))
-            cap = cv2.VideoCapture(int(source) if source.isnumeric() else source)
-            if not cap.isOpened():
+            capture = self._open_capture(source)
+            if capture is None:
                 self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Нет сигнала")
                 return
 
             while self._running:
-                ret, frame = cap.read()
+                ret, frame = capture.read()
                 if not ret:
                     self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Поток остановлен")
                     break
@@ -82,7 +91,7 @@ class ChannelWorker(QtCore.QThread):
                 )
                 self.frame_ready.emit(self.channel_conf.get("name", "Канал"), q_image)
 
-            cap.release()
+            capture.release()
         except Exception as exc:  # noqa: BLE001
             self.status_ready.emit(self.channel_conf.get("name", "Канал"), f"Ошибка: {exc}")
 
@@ -180,10 +189,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for col in range(cols):
                 label = QtWidgets.QLabel("Нет сигнала")
                 label.setAlignment(QtCore.Qt.AlignCenter)
-                label.setStyleSheet("background-color: #1c1c1c; color: #ccc; border: 1px solid #444;")
-                label.setMinimumSize(200, 160)
-                label.setScaledContents(True)
-                label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+                label.setStyleSheet(
+                    "background-color: #1c1c1c; color: #ccc; border: 1px solid #444; padding: 4px;"
+                )
+                label.setMinimumSize(220, 170)
+                label.setScaledContents(False)
+                label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
                 if index < len(channels):
                     channel_name = channels[index].get("name", f"Канал {index+1}")
                     label.setText(channel_name)
@@ -209,15 +220,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_workers(self) -> None:
         for worker in self.channel_workers:
             worker.stop()
-            worker.wait(200)
+            worker.wait(1000)
         self.channel_workers = []
 
     def _update_frame(self, channel_name: str, image: QtGui.QImage) -> None:
         label = self.channel_labels.get(channel_name)
         if not label:
             return
+        target_size = label.contentsRect().size()
         pixmap = QtGui.QPixmap.fromImage(image).scaled(
-            label.width(), label.height(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+            target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
         )
         label.setPixmap(pixmap)
 
