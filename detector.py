@@ -1,7 +1,8 @@
 import argparse
 import os
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+import logging
 
 import cv2
 import torch
@@ -11,6 +12,8 @@ from ultralytics import YOLO
 import torch.ao.quantization.quantize_fx as quantize_fx
 from torch.ao.quantization import QConfigMapping
 import numpy as np
+
+from logging_manager import LoggingManager, get_logger
 
 
 
@@ -22,10 +25,16 @@ class Config:
     OCR_IMG_HEIGHT: int = 32
     OCR_IMG_WIDTH: int = 128
     OCR_ALPHABET: str = '0123456789ABCEHKMOPTXY'
-    
+    OCR_CONFIDENCE_THRESHOLD: float = 0.6
+
     DETECTION_CONFIDENCE_THRESHOLD: float = 0.5
-    
-    DEVICE: torch.device = torch.device("cpu") 
+
+    TRACK_BEST_SHOTS: int = 3
+
+    DEVICE: torch.device = torch.device("cpu")
+
+
+logger = get_logger(__name__)
 
 
 class CRNN(nn.Module):
@@ -95,11 +104,13 @@ class CRNN(nn.Module):
 
 class YOLODetector:
     """Обертка для модели детекции YOLO."""
+
     def __init__(self, model_path: str, device: torch.device):
         self.model = YOLO(model_path)
         self.model.to(device)
         self.device = device
-        print("✅ Детектор YOLO успешно загружен.")
+        self._tracking_supported = True
+        logger.info("Детектор YOLO успешно загружен (model=%s, device=%s)", model_path, device)
 
     def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         """Обнаруживает номера на ОДНОМ кадре (для изображений)."""
@@ -108,28 +119,52 @@ class YOLODetector:
         for det in detections[0].boxes.data:
             x1, y1, x2, y2, conf, _ = det.cpu().numpy()
             if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
-                results.append({ "bbox": [int(x1), int(y1), int(x2), int(y2)], "confidence": float(conf) })
+                results.append({"bbox": [int(x1), int(y1), int(x2), int(y2)], "confidence": float(conf)})
         return results
-        
-    def track(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-        """Отслеживает номера в ПОСЛЕДОВАТЕЛЬНОСТИ кадров (для видео)."""
+
+    def _track_internal(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         detections = self.model.track(frame, persist=True, verbose=False, device=self.device)
-        results = []
+        results: List[Dict[str, Any]] = []
         if detections[0].boxes.id is None:
             return results
-            
+
         track_ids = detections[0].boxes.id.int().cpu().tolist()
         boxes = detections[0].boxes.xyxy.cpu().numpy()
         confs = detections[0].boxes.conf.cpu().numpy()
 
         for box, track_id, conf in zip(boxes, track_ids, confs):
-             if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
-                results.append({
-                    "bbox": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
-                    "confidence": float(conf),
-                    "track_id": track_id
-                })
+            if conf >= Config.DETECTION_CONFIDENCE_THRESHOLD:
+                results.append(
+                    {
+                        "bbox": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
+                        "confidence": float(conf),
+                        "track_id": track_id,
+                    }
+                )
         return results
+
+    def track(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """Отслеживает номера в последовательности кадров (для видео) с откатом к детекции."""
+        if not self._tracking_supported:
+            return self.detect(frame)
+
+        try:
+            return self._track_internal(frame)
+        except ModuleNotFoundError:
+            # Отсутствующие зависимости трекера (например, lap/byte-track) ломают поток при повторном
+            # запуске. Запоминаем, что трекинг недоступен, и продолжаем с обычной детекцией.
+            self._tracking_supported = False
+            logger.warning("Отключаем трекинг YOLO: отсутствуют зависимости")
+            return self.detect(frame)
+        except Exception:
+            # Любые другие ошибки трекера (например, при одновременном запуске нескольких каналов)
+            # не должны приводить к падению — отключаем трекинг и продолжаем детекцию.
+            self._tracking_supported = False
+            logger.exception("Отключаем трекинг YOLO из-за ошибки, переключаемся на detect")
+            return self.detect(frame)
+    # Ниже оставлены только методы с откатом на детекцию, чтобы избежать падений из-за
+    # необязательных зависимостей трекера.
+
 
 class CRNNRecognizer:
     """Обертка для квантованной модели распознавания CRNN."""
@@ -158,24 +193,42 @@ class CRNNRecognizer:
         # 3. И только теперь загружаем сохраненные веса
         model_quantized.load_state_dict(torch.load(model_path, map_location=device))
         self.model = model_quantized
-        print("✅ Распознаватель OCR (INT8) успешно загружен.")
+        logger.info("Распознаватель OCR (INT8) успешно загружен (model=%s, device=%s)", model_path, device)
 
     @torch.no_grad()
-    def recognize(self, plate_image: np.ndarray) -> str:
+    def recognize(self, plate_image: np.ndarray) -> tuple[str, float]:
         preprocessed_plate = self.transform(plate_image).unsqueeze(0).to(self.device)
         preds = self.model(preprocessed_plate)
-        return self._decode(preds)
+        return self._decode_with_confidence(preds)
 
-    def _decode(self, preds: torch.Tensor) -> str:
-        preds = preds.permute(1, 0, 2).argmax(dim=2)[0] # Упрощаем и берем первый элемент батча
-        decoded_seq = []
+    def _decode_with_confidence(self, log_probs: torch.Tensor) -> tuple[str, float]:
+        """Декодирует CTC-выход и возвращает текст и уверенность (0..1)."""
+        # log_probs: (seq_len, batch, num_classes)
+        probs = log_probs.permute(1, 0, 2)[0]  # (seq_len, num_classes)
+        time_steps = probs.size(0)
+
+        decoded_chars: list[str] = []
+        char_confidences: list[float] = []
         last_char_idx = 0
-        for char_idx in preds:
-            char_idx = char_idx.item()
+
+        for t in range(time_steps):
+            timestep_log_probs = probs[t]
+            char_idx = int(torch.argmax(timestep_log_probs).item())
+            char_conf = float(torch.exp(torch.max(timestep_log_probs)).item())
+
             if char_idx != 0 and char_idx != last_char_idx:
-                decoded_seq.append(self.int_to_char.get(char_idx, ''))
+                decoded_chars.append(self.int_to_char.get(char_idx, ''))
+                char_confidences.append(char_conf)
+
             last_char_idx = char_idx
-        return "".join(decoded_seq)
+
+        text = "".join(decoded_chars)
+        if not char_confidences:
+            return text, 0.0
+
+        # Усредняем уверенность по символам, чтобы штрафовать длинные шумные последовательности.
+        avg_confidence = sum(char_confidences) / len(char_confidences)
+        return text, avg_confidence
 
 class Visualizer:
     """Отвечает за отрисовку результатов."""
@@ -192,12 +245,59 @@ class Visualizer:
 
 from collections import Counter
 
+class TrackAggregator:
+    """Агрегирует результаты распознавания в рамках одного трека."""
+
+    def __init__(self, best_shots: int):
+        self.best_shots = max(1, best_shots)
+        self.track_texts: Dict[int, List[str]] = {}
+        self.last_emitted: Dict[int, str] = {}
+
+    def add_result(self, track_id: int, text: str) -> str:
+        """Сохраняет промежуточный результат и возвращает консенсус, если он сформирован."""
+        if not text:
+            return ""
+
+        bucket = self.track_texts.setdefault(track_id, [])
+        bucket.append(text)
+        if len(bucket) > self.best_shots:
+            bucket.pop(0)
+
+        counts = Counter(bucket)
+        consensus, freq = counts.most_common(1)[0]
+        # Консенсус выдается, когда собраны заданное число бестшотов и есть большинство.
+        quorum = max(1, (self.best_shots + 1) // 2)
+        has_quorum = len(bucket) >= self.best_shots and freq >= quorum
+        if has_quorum and self.last_emitted.get(track_id) != consensus:
+            self.last_emitted[track_id] = consensus
+            return consensus
+        return ""
+
+
 class ANPR_Pipeline:
     """Главный класс, управляющий процессом распознавания."""
-    def __init__(self, recognizer: CRNNRecognizer):
+
+    def __init__(
+        self,
+        recognizer: CRNNRecognizer,
+        best_shots: int,
+        cooldown_seconds: int = 0,
+        min_confidence: float = Config.OCR_CONFIDENCE_THRESHOLD,
+    ):
         self.recognizer = recognizer
-        self.track_history = {} # {track_id: [list_of_texts]}
-        self.TRACK_BUFFER_SIZE = 15
+        self.aggregator = TrackAggregator(best_shots)
+        self.cooldown_seconds = max(0, cooldown_seconds)
+        self.min_confidence = max(0.0, min(1.0, min_confidence))
+        self._last_seen: Dict[str, float] = {}
+
+    def _on_cooldown(self, plate: str) -> bool:
+        last_seen = self._last_seen.get(plate)
+        if last_seen is None:
+            return False
+        return (time.monotonic() - last_seen) < self.cooldown_seconds
+
+    def _touch_plate(self, plate: str) -> None:
+        self._last_seen[plate] = time.monotonic()
 
     # --- МЕТОДЫ ДЛЯ КОРРЕКЦИИ ПЕРСПЕКТИВЫ ---
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
@@ -238,16 +338,6 @@ class ANPR_Pipeline:
                 return self._four_point_transform(plate_image, approx.reshape(4, 2))
         return plate_image
 
-    # --- МЕТОД ДЛЯ СТАБИЛИЗАЦИИ РЕЗУЛЬТАТА ---
-    def _stabilize_text(self, track_id: int, new_text: str) -> str:
-        if track_id not in self.track_history: self.track_history[track_id] = []
-        self.track_history[track_id].append(new_text)
-        if len(self.track_history[track_id]) > self.TRACK_BUFFER_SIZE: self.track_history[track_id].pop(0)
-        counts = Counter(self.track_history[track_id])
-        if not counts: return ""
-        best_text, best_count = counts.most_common(1)[0]
-        return best_text if best_count >= 3 else ""
-
     # --- ГЛАВНЫЙ МЕТОД ОБРАБОТКИ ---
     def process_frame(self, frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for detection in detections:
@@ -260,13 +350,29 @@ class ANPR_Pipeline:
                 
                 if processed_plate.size > 0:
                     # 2. РАСПОЗНАЕМ
-                    current_text = self.recognizer.recognize(processed_plate)
-                    
-                    # 3. СТАБИЛИЗИРУЕМ (если есть track_id)
+                    current_text, confidence = self.recognizer.recognize(processed_plate)
+
+                    if confidence < self.min_confidence:
+                        detection['text'] = "Нечитаемо"
+                        detection['unreadable'] = True
+                        detection['confidence'] = confidence
+                        continue
+
+                    # 3. Агрегируем по треку или фиксируем напрямую для одиночных фото
                     if 'track_id' in detection:
-                        detection['text'] = self._stabilize_text(detection['track_id'], current_text)
-                    else: # Для одиночных фото
+                        detection['text'] = self.aggregator.add_result(
+                            detection['track_id'], current_text
+                        )
+                    else:  # Для одиночных фото
                         detection['text'] = current_text
+
+                    detection['confidence'] = confidence
+
+                    if self.cooldown_seconds > 0 and detection.get('text'):
+                        if self._on_cooldown(detection['text']):
+                            detection['text'] = ""
+                        else:
+                            self._touch_plate(detection['text'])
         return detections
 
 def process_source(pipeline: ANPR_Pipeline, detector: YOLODetector, source_path: str):
@@ -312,11 +418,12 @@ def main():
     parser = argparse.ArgumentParser(description="Распознавание автомобильных номеров.")
     parser.add_argument("--source", required=True, help="Путь к изображению, видеофайлу или ID веб-камеры (напр., '0').")
     args = parser.parse_args()
-    
+
     try:
+        LoggingManager()
         detector = YOLODetector(Config.YOLO_MODEL_PATH, Config.DEVICE)
         recognizer = CRNNRecognizer(Config.OCR_MODEL_PATH, Config.DEVICE)
-        pipeline = ANPR_Pipeline(recognizer)
+        pipeline = ANPR_Pipeline(recognizer, Config.TRACK_BEST_SHOTS)
         process_source(pipeline, detector, args.source)
     except (IOError, FileNotFoundError) as e:
         print(f"Критическая ошибка: {e}")
