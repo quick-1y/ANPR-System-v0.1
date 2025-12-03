@@ -8,5 +8,9 @@ env/
 __pycache__/
 *.pyc
 
+# База данных событий
+data/events.db
+data/*.log
+
 # Системные файлы
 .DS_Store
