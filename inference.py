@@ -16,8 +16,8 @@ import numpy as np
 
 class Config:
     """Класс для хранения всех конфигурационных параметров."""
-    YOLO_MODEL_PATH: str = 'models/yolo/model/best.pt'
-    OCR_MODEL_PATH: str = 'models/ocr_crnn/quant/crnn_ocr_model_int8_fx.pth'
+    YOLO_MODEL_PATH: str = 'models/yolo/best.pt'
+    OCR_MODEL_PATH: str = 'models/ocr_crnn/cnn.pth'
     
     OCR_IMG_HEIGHT: int = 32
     OCR_IMG_WIDTH: int = 128
