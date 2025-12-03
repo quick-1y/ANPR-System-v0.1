@@ -22,6 +22,9 @@ class SettingsManager:
                 "cooldown_seconds": 5,
                 "ocr_min_confidence": 0.6,
             },
+            "performance": {
+                "max_fps": 10,
+            },
             "logging": {
                 "level": "INFO",
                 "file": "data/app.log",
@@ -88,6 +91,16 @@ class SettingsManager:
         tracking = self.settings.get("tracking", {})
         tracking["ocr_min_confidence"] = float(min_conf)
         self.settings["tracking"] = tracking
+        self._save(self.settings)
+
+    def get_max_fps(self) -> int:
+        perf = self.settings.get("performance", {})
+        return int(perf.get("max_fps", 10))
+
+    def save_max_fps(self, max_fps: int) -> None:
+        perf = self.settings.get("performance", {})
+        perf["max_fps"] = max(1, int(max_fps))
+        self.settings["performance"] = perf
         self._save(self.settings)
 
     def get_logging_config(self) -> Dict[str, Any]:

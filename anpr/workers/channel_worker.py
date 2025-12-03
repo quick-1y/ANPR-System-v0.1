@@ -26,6 +26,7 @@ class ChannelWorker(QtCore.QThread):
         best_shots: int,
         cooldown_seconds: int,
         min_confidence: float,
+        max_fps: int,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -35,6 +36,7 @@ class ChannelWorker(QtCore.QThread):
         self.best_shots = best_shots
         self.cooldown_seconds = cooldown_seconds
         self.min_confidence = min_confidence
+        self.max_fps = max_fps
 
     def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
         capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
@@ -103,7 +105,9 @@ class ChannelWorker(QtCore.QThread):
 
         channel_name = self.channel_conf.get("name", "Канал")
         logger.info("Канал %s запущен (источник=%s)", channel_name, source)
+        frame_delay = 1.0 / max(1, self.max_fps)
         while self._running:
+            iteration_started = asyncio.get_event_loop().time()
             ret, frame = await asyncio.to_thread(capture.read)
             if not ret:
                 self.status_ready.emit(channel_name, "Поток остановлен")
@@ -123,6 +127,10 @@ class ChannelWorker(QtCore.QThread):
                 rgb_frame.data, width, height, bytes_per_line, QtGui.QImage.Format_RGB888
             ).copy()
             self.frame_ready.emit(channel_name, q_image)
+
+            elapsed = asyncio.get_event_loop().time() - iteration_started
+            if elapsed < frame_delay:
+                await asyncio.sleep(frame_delay - elapsed)
 
         capture.release()
 

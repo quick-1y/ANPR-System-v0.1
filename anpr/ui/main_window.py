@@ -125,6 +125,7 @@ class MainWindow(QtWidgets.QMainWindow):
         best_shots = self.settings.get_best_shots()
         cooldown = self.settings.get_cooldown_seconds()
         min_confidence = self.settings.get_min_confidence()
+        max_fps = self.settings.get_max_fps()
         for channel_conf in self.settings.get_channels():
             worker = ChannelWorker(
                 channel_conf,
@@ -132,6 +133,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 best_shots,
                 cooldown,
                 min_confidence,
+                max_fps,
             )
             worker.frame_ready.connect(self._update_frame)
             worker.event_ready.connect(self._handle_event)
@@ -297,6 +299,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
         )
         form_layout.addRow("Пауза повтора (сек):", self.cooldown_input)
+        self.max_fps_input = QtWidgets.QSpinBox()
+        self.max_fps_input.setRange(1, 60)
+        self.max_fps_input.setValue(self.settings.get_max_fps())
+        self.max_fps_input.setToolTip("Ограничение кадров в секунду для снижения нагрузки на ЦП")
+        form_layout.addRow("Макс FPS каналов:", self.max_fps_input)
         self.min_conf_input = QtWidgets.QDoubleSpinBox()
         self.min_conf_input.setRange(0.0, 1.0)
         self.min_conf_input.setSingleStep(0.05)
@@ -363,6 +370,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.save_best_shots(self.best_shots_input.value())
         self.settings.save_cooldown_seconds(self.cooldown_input.value())
         self.settings.save_min_confidence(self.min_conf_input.value())
+        self.settings.save_max_fps(self.max_fps_input.value())
         index = self.channels_list.currentRow()
         channels = self.settings.get_channels()
         if 0 <= index < len(channels):
