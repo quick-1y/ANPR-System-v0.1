@@ -3,6 +3,8 @@ import sqlite3
 from datetime import datetime
 from typing import List, Optional, Sequence
 
+from logging_manager import get_logger
+
 
 class EventDatabase:
     """SQLite-хранилище для последних распознанных номеров."""
@@ -11,6 +13,7 @@ class EventDatabase:
         self.db_path = db_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
+        self.logger = get_logger(__name__)
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -46,6 +49,9 @@ class EventDatabase:
                 (ts, channel, plate, confidence, source),
             )
             conn.commit()
+            self.logger.info(
+                "Event saved: %s (%s, conf=%.2f, src=%s)", plate, channel, confidence or 0.0, source
+            )
             return cursor.lastrowid
 
     def fetch_recent(self, limit: int = 100) -> List[sqlite3.Row]:

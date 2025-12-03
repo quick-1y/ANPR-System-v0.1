@@ -10,6 +10,7 @@ __pycache__/
 
 # База данных событий
 data/events.db
+data/*.log
 
 # Системные файлы
 .DS_Store

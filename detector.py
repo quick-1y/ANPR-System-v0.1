@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 from typing import List, Dict, Any, Tuple
+import logging
 
 import cv2
 import torch
@@ -11,6 +12,8 @@ from ultralytics import YOLO
 import torch.ao.quantization.quantize_fx as quantize_fx
 from torch.ao.quantization import QConfigMapping
 import numpy as np
+
+from logging_manager import LoggingManager, get_logger
 
 
 
@@ -29,6 +32,9 @@ class Config:
     TRACK_BEST_SHOTS: int = 3
 
     DEVICE: torch.device = torch.device("cpu")
+
+
+logger = get_logger(__name__)
 
 
 class CRNN(nn.Module):
@@ -104,7 +110,7 @@ class YOLODetector:
         self.model.to(device)
         self.device = device
         self._tracking_supported = True
-        print("✅ Детектор YOLO успешно загружен.")
+        logger.info("Детектор YOLO успешно загружен (model=%s, device=%s)", model_path, device)
 
     def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         """Обнаруживает номера на ОДНОМ кадре (для изображений)."""
@@ -148,11 +154,13 @@ class YOLODetector:
             # Отсутствующие зависимости трекера (например, lap/byte-track) ломают поток при повторном
             # запуске. Запоминаем, что трекинг недоступен, и продолжаем с обычной детекцией.
             self._tracking_supported = False
+            logger.warning("Отключаем трекинг YOLO: отсутствуют зависимости")
             return self.detect(frame)
         except Exception:
             # Любые другие ошибки трекера (например, при одновременном запуске нескольких каналов)
             # не должны приводить к падению — отключаем трекинг и продолжаем детекцию.
             self._tracking_supported = False
+            logger.exception("Отключаем трекинг YOLO из-за ошибки, переключаемся на detect")
             return self.detect(frame)
     # Ниже оставлены только методы с откатом на детекцию, чтобы избежать падений из-за
     # необязательных зависимостей трекера.
@@ -185,7 +193,7 @@ class CRNNRecognizer:
         # 3. И только теперь загружаем сохраненные веса
         model_quantized.load_state_dict(torch.load(model_path, map_location=device))
         self.model = model_quantized
-        print("✅ Распознаватель OCR (INT8) успешно загружен.")
+        logger.info("Распознаватель OCR (INT8) успешно загружен (model=%s, device=%s)", model_path, device)
 
     @torch.no_grad()
     def recognize(self, plate_image: np.ndarray) -> tuple[str, float]:
@@ -410,8 +418,9 @@ def main():
     parser = argparse.ArgumentParser(description="Распознавание автомобильных номеров.")
     parser.add_argument("--source", required=True, help="Путь к изображению, видеофайлу или ID веб-камеры (напр., '0').")
     args = parser.parse_args()
-    
+
     try:
+        LoggingManager()
         detector = YOLODetector(Config.YOLO_MODEL_PATH, Config.DEVICE)
         recognizer = CRNNRecognizer(Config.OCR_MODEL_PATH, Config.DEVICE)
         pipeline = ANPR_Pipeline(recognizer, Config.TRACK_BEST_SHOTS)

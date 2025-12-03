@@ -22,6 +22,12 @@ class SettingsManager:
                 "cooldown_seconds": 5,
                 "ocr_min_confidence": 0.6,
             },
+            "logging": {
+                "level": "INFO",
+                "file": "data/app.log",
+                "max_bytes": 1048576,
+                "backup_count": 5,
+            },
         }
 
     def _load(self) -> Dict[str, Any]:
@@ -83,6 +89,9 @@ class SettingsManager:
         tracking["ocr_min_confidence"] = float(min_conf)
         self.settings["tracking"] = tracking
         self._save(self.settings)
+
+    def get_logging_config(self) -> Dict[str, Any]:
+        return self.settings.get("logging", {})
 
     def refresh(self) -> None:
         self.settings = self._load()

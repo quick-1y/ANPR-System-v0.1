@@ -14,5 +14,11 @@
     "best_shots": 3,
     "cooldown_seconds": 5,
     "ocr_min_confidence": 0.6
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "data/app.log",
+    "max_bytes": 1048576,
+    "backup_count": 5
   }
 }

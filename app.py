@@ -7,6 +7,7 @@ import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from detector import ANPR_Pipeline, CRNNRecognizer, YOLODetector, Config as ModelConfig
+from logging_manager import LoggingManager, get_logger
 from settings_manager import SettingsManager
 from storage import EventDatabase
 
@@ -21,6 +22,9 @@ warnings.filterwarnings(
     message="must run observer before calling calculate_qparams",
     module="torch.ao.quantization.observer",
 )
+
+
+logger = get_logger(__name__)
 
 
 class ChannelWorker(QtCore.QThread):
@@ -73,12 +77,15 @@ class ChannelWorker(QtCore.QThread):
             capture = self._open_capture(source)
             if capture is None:
                 self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Нет сигнала")
+                logger.warning("Не удалось открыть источник %s для канала %s", source, self.channel_conf)
                 return
 
+            logger.info("Канал %s запущен (источник=%s)", self.channel_conf.get("name", "Канал"), source)
             while self._running:
                 ret, frame = capture.read()
                 if not ret:
                     self.status_ready.emit(self.channel_conf.get("name", "Канал"), "Поток остановлен")
+                    logger.warning("Поток остановлен для канала %s", self.channel_conf.get("name", "Канал"))
                     break
 
                 detections = detector.track(frame)
@@ -86,6 +93,11 @@ class ChannelWorker(QtCore.QThread):
 
                 for res in results:
                     if res.get("unreadable"):
+                        logger.debug(
+                            "Канал %s: номер помечен как нечитаемый (confidence=%.2f)",
+                            self.channel_conf.get("name", "Канал"),
+                            res.get("confidence", 0.0),
+                        )
                         continue
                     if res.get("text"):
                         event = {
@@ -103,6 +115,13 @@ class ChannelWorker(QtCore.QThread):
                             timestamp=event["timestamp"],
                         )
                         self.event_ready.emit(event)
+                        logger.info(
+                            "Канал %s: зафиксирован номер %s (conf=%.2f, track=%s)",
+                            event["channel"],
+                            event["plate"],
+                            event["confidence"],
+                            res.get("track_id", "-"),
+                        )
 
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width, channel = rgb_frame.shape
@@ -115,6 +134,7 @@ class ChannelWorker(QtCore.QThread):
             capture.release()
         except Exception as exc:  # noqa: BLE001
             self.status_ready.emit(self.channel_conf.get("name", "Канал"), f"Ошибка: {exc}")
+            logger.exception("Канал %s аварийно остановлен", self.channel_conf.get("name", "Канал"))
 
     def stop(self) -> None:
         self._running = False
@@ -123,12 +143,12 @@ class ChannelWorker(QtCore.QThread):
 class MainWindow(QtWidgets.QMainWindow):
     GRID_VARIANTS = ["1x1", "1x2", "2x2", "2x3", "3x3"]
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Optional[SettingsManager] = None) -> None:
         super().__init__()
         self.setWindowTitle("ANPR Desktop")
         self.resize(1280, 800)
 
-        self.settings = SettingsManager()
+        self.settings = settings or SettingsManager()
         self.db = EventDatabase(self.settings.get_db_path())
 
         self.channel_workers: List[ChannelWorker] = []
@@ -495,8 +515,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main() -> None:
+    settings = SettingsManager()
+    LoggingManager(settings.get_logging_config())
+    logger.info("Запуск ANPR Desktop")
+
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(settings)
     window.show()
     sys.exit(app.exec_())
 
