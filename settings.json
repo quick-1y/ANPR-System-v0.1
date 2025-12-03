@@ -1,0 +1,24 @@
+{
+  "grid": "2x2",
+  "channels": [
+    {
+      "id": 1,
+      "name": "Канал 1",
+      "source": "0"
+    }
+  ],
+  "storage": {
+    "events_db": "data/events.db"
+  },
+  "tracking": {
+    "best_shots": 3,
+    "cooldown_seconds": 5,
+    "ocr_min_confidence": 0.6
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "data/app.log",
+    "max_bytes": 1048576,
+    "backup_count": 5
+  }
+}
