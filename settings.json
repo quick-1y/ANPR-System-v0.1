@@ -11,6 +11,7 @@
     "events_db": "data/events.db"
   },
   "tracking": {
-    "best_shots": 3
+    "best_shots": 3,
+    "cooldown_seconds": 5
   }
 }

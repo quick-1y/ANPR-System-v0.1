@@ -17,7 +17,7 @@ class SettingsManager:
                 {"id": 1, "name": "Канал 1", "source": "0"},
             ],
             "storage": {"events_db": "data/events.db"},
-            "tracking": {"best_shots": 3},
+            "tracking": {"best_shots": 3, "cooldown_seconds": 5},
         }
 
     def _load(self) -> Dict[str, Any]:
@@ -57,6 +57,16 @@ class SettingsManager:
     def save_best_shots(self, best_shots: int) -> None:
         tracking = self.settings.get("tracking", {})
         tracking["best_shots"] = int(best_shots)
+        self.settings["tracking"] = tracking
+        self._save(self.settings)
+
+    def get_cooldown_seconds(self) -> int:
+        tracking = self.settings.get("tracking", {})
+        return int(tracking.get("cooldown_seconds", 5))
+
+    def save_cooldown_seconds(self, cooldown: int) -> None:
+        tracking = self.settings.get("tracking", {})
+        tracking["cooldown_seconds"] = int(cooldown)
         self.settings["tracking"] = tracking
         self._save(self.settings)
 

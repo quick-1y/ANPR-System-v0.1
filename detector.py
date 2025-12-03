@@ -245,9 +245,20 @@ class TrackAggregator:
 class ANPR_Pipeline:
     """Главный класс, управляющий процессом распознавания."""
 
-    def __init__(self, recognizer: CRNNRecognizer, best_shots: int):
+    def __init__(self, recognizer: CRNNRecognizer, best_shots: int, cooldown_seconds: int = 0):
         self.recognizer = recognizer
         self.aggregator = TrackAggregator(best_shots)
+        self.cooldown_seconds = max(0, cooldown_seconds)
+        self._last_seen: Dict[str, float] = {}
+
+    def _on_cooldown(self, plate: str) -> bool:
+        last_seen = self._last_seen.get(plate)
+        if last_seen is None:
+            return False
+        return (time.monotonic() - last_seen) < self.cooldown_seconds
+
+    def _touch_plate(self, plate: str) -> None:
+        self._last_seen[plate] = time.monotonic()
 
     # --- МЕТОДЫ ДЛЯ КОРРЕКЦИИ ПЕРСПЕКТИВЫ ---
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
@@ -309,6 +320,12 @@ class ANPR_Pipeline:
                         )
                     else:  # Для одиночных фото
                         detection['text'] = current_text
+
+                    if self.cooldown_seconds > 0 and detection.get('text'):
+                        if self._on_cooldown(detection['text']):
+                            detection['text'] = ""
+                        else:
+                            self._touch_plate(detection['text'])
         return detections
 
 def process_source(pipeline: ANPR_Pipeline, detector: YOLODetector, source_path: str):
