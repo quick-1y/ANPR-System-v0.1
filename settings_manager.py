@@ -17,6 +17,7 @@ class SettingsManager:
                 {"id": 1, "name": "Канал 1", "source": "0"},
             ],
             "storage": {"events_db": "data/events.db"},
+            "tracking": {"best_shots": 3},
         }
 
     def _load(self) -> Dict[str, Any]:
@@ -48,6 +49,16 @@ class SettingsManager:
     def get_db_path(self) -> str:
         storage = self.settings.get("storage", {})
         return storage.get("events_db", "data/events.db")
+
+    def get_best_shots(self) -> int:
+        tracking = self.settings.get("tracking", {})
+        return int(tracking.get("best_shots", 3))
+
+    def save_best_shots(self, best_shots: int) -> None:
+        tracking = self.settings.get("tracking", {})
+        tracking["best_shots"] = int(best_shots)
+        self.settings["tracking"] = tracking
+        self._save(self.settings)
 
     def refresh(self) -> None:
         self.settings = self._load()

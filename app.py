@@ -28,11 +28,12 @@ class ChannelWorker(QtCore.QThread):
     event_ready = QtCore.pyqtSignal(dict)
     status_ready = QtCore.pyqtSignal(str, str)
 
-    def __init__(self, channel_conf: Dict, db_path: str, parent=None) -> None:
+    def __init__(self, channel_conf: Dict, db_path: str, best_shots: int, parent=None) -> None:
         super().__init__(parent)
         self.channel_conf = channel_conf
         self.db_path = db_path
         self._running = True
+        self.best_shots = best_shots
 
     def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
         capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
@@ -43,7 +44,7 @@ class ChannelWorker(QtCore.QThread):
     def _build_pipeline(self) -> Tuple[ANPR_Pipeline, YOLODetector]:
         detector = YOLODetector(ModelConfig.YOLO_MODEL_PATH, ModelConfig.DEVICE)
         recognizer = CRNNRecognizer(ModelConfig.OCR_MODEL_PATH, ModelConfig.DEVICE)
-        return ANPR_Pipeline(recognizer), detector
+        return ANPR_Pipeline(recognizer, self.best_shots), detector
 
     def run(self) -> None:
         try:
@@ -209,8 +210,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_channels(self) -> None:
         self._stop_workers()
         self.channel_workers = []
+        best_shots = self.settings.get_best_shots()
         for channel_conf in self.settings.get_channels():
-            worker = ChannelWorker(channel_conf, self.settings.get_db_path())
+            worker = ChannelWorker(channel_conf, self.settings.get_db_path(), best_shots)
             worker.frame_ready.connect(self._update_frame)
             worker.event_ready.connect(self._handle_event)
             worker.status_ready.connect(self._handle_status)
@@ -371,6 +373,11 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.channels_list)
 
         form_layout = QtWidgets.QFormLayout()
+        self.best_shots_input = QtWidgets.QSpinBox()
+        self.best_shots_input.setRange(1, 50)
+        self.best_shots_input.setValue(self.settings.get_best_shots())
+        self.best_shots_input.setToolTip("Количество бестшотов, участвующих в консенсусе трека")
+        form_layout.addRow("Бестшоты на трек:", self.best_shots_input)
         self.channel_name_input = QtWidgets.QLineEdit()
         self.channel_source_input = QtWidgets.QLineEdit()
         form_layout.addRow("Название:", self.channel_name_input)
@@ -425,6 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._draw_grid()
 
     def _save_channel(self) -> None:
+        self.settings.save_best_shots(self.best_shots_input.value())
         index = self.channels_list.currentRow()
         channels = self.settings.get_channels()
         if 0 <= index < len(channels):

@@ -9,5 +9,8 @@
   ],
   "storage": {
     "events_db": "data/events.db"
+  },
+  "tracking": {
+    "best_shots": 3
   }
 }

@@ -22,10 +22,12 @@ class Config:
     OCR_IMG_HEIGHT: int = 32
     OCR_IMG_WIDTH: int = 128
     OCR_ALPHABET: str = '0123456789ABCEHKMOPTXY'
-    
+
     DETECTION_CONFIDENCE_THRESHOLD: float = 0.5
-    
-    DEVICE: torch.device = torch.device("cpu") 
+
+    TRACK_BEST_SHOTS: int = 3
+
+    DEVICE: torch.device = torch.device("cpu")
 
 
 class CRNN(nn.Module):
@@ -211,12 +213,41 @@ class Visualizer:
 
 from collections import Counter
 
+class TrackAggregator:
+    """Агрегирует результаты распознавания в рамках одного трека."""
+
+    def __init__(self, best_shots: int):
+        self.best_shots = max(1, best_shots)
+        self.track_texts: Dict[int, List[str]] = {}
+        self.last_emitted: Dict[int, str] = {}
+
+    def add_result(self, track_id: int, text: str) -> str:
+        """Сохраняет промежуточный результат и возвращает консенсус, если он сформирован."""
+        if not text:
+            return ""
+
+        bucket = self.track_texts.setdefault(track_id, [])
+        bucket.append(text)
+        if len(bucket) > self.best_shots:
+            bucket.pop(0)
+
+        counts = Counter(bucket)
+        consensus, freq = counts.most_common(1)[0]
+        # Консенсус выдается, когда собраны заданное число бестшотов и есть большинство.
+        quorum = max(1, (self.best_shots + 1) // 2)
+        has_quorum = len(bucket) >= self.best_shots and freq >= quorum
+        if has_quorum and self.last_emitted.get(track_id) != consensus:
+            self.last_emitted[track_id] = consensus
+            return consensus
+        return ""
+
+
 class ANPR_Pipeline:
     """Главный класс, управляющий процессом распознавания."""
-    def __init__(self, recognizer: CRNNRecognizer):
+
+    def __init__(self, recognizer: CRNNRecognizer, best_shots: int):
         self.recognizer = recognizer
-        self.track_history = {} # {track_id: [list_of_texts]}
-        self.TRACK_BUFFER_SIZE = 15
+        self.aggregator = TrackAggregator(best_shots)
 
     # --- МЕТОДЫ ДЛЯ КОРРЕКЦИИ ПЕРСПЕКТИВЫ ---
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
@@ -257,16 +288,6 @@ class ANPR_Pipeline:
                 return self._four_point_transform(plate_image, approx.reshape(4, 2))
         return plate_image
 
-    # --- МЕТОД ДЛЯ СТАБИЛИЗАЦИИ РЕЗУЛЬТАТА ---
-    def _stabilize_text(self, track_id: int, new_text: str) -> str:
-        if track_id not in self.track_history: self.track_history[track_id] = []
-        self.track_history[track_id].append(new_text)
-        if len(self.track_history[track_id]) > self.TRACK_BUFFER_SIZE: self.track_history[track_id].pop(0)
-        counts = Counter(self.track_history[track_id])
-        if not counts: return ""
-        best_text, best_count = counts.most_common(1)[0]
-        return best_text if best_count >= 3 else ""
-
     # --- ГЛАВНЫЙ МЕТОД ОБРАБОТКИ ---
     def process_frame(self, frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for detection in detections:
@@ -281,10 +302,12 @@ class ANPR_Pipeline:
                     # 2. РАСПОЗНАЕМ
                     current_text = self.recognizer.recognize(processed_plate)
                     
-                    # 3. СТАБИЛИЗИРУЕМ (если есть track_id)
+                    # 3. Агрегируем по треку или фиксируем напрямую для одиночных фото
                     if 'track_id' in detection:
-                        detection['text'] = self._stabilize_text(detection['track_id'], current_text)
-                    else: # Для одиночных фото
+                        detection['text'] = self.aggregator.add_result(
+                            detection['track_id'], current_text
+                        )
+                    else:  # Для одиночных фото
                         detection['text'] = current_text
         return detections
 
@@ -335,7 +358,7 @@ def main():
     try:
         detector = YOLODetector(Config.YOLO_MODEL_PATH, Config.DEVICE)
         recognizer = CRNNRecognizer(Config.OCR_MODEL_PATH, Config.DEVICE)
-        pipeline = ANPR_Pipeline(recognizer)
+        pipeline = ANPR_Pipeline(recognizer, Config.TRACK_BEST_SHOTS)
         process_source(pipeline, detector, args.source)
     except (IOError, FileNotFoundError) as e:
         print(f"Критическая ошибка: {e}")
