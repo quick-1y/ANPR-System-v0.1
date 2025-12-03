@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import cv2
 import torch
@@ -22,6 +22,7 @@ class Config:
     OCR_IMG_HEIGHT: int = 32
     OCR_IMG_WIDTH: int = 128
     OCR_ALPHABET: str = '0123456789ABCEHKMOPTXY'
+    OCR_CONFIDENCE_THRESHOLD: float = 0.6
 
     DETECTION_CONFIDENCE_THRESHOLD: float = 0.5
 
@@ -187,21 +188,39 @@ class CRNNRecognizer:
         print("✅ Распознаватель OCR (INT8) успешно загружен.")
 
     @torch.no_grad()
-    def recognize(self, plate_image: np.ndarray) -> str:
+    def recognize(self, plate_image: np.ndarray) -> tuple[str, float]:
         preprocessed_plate = self.transform(plate_image).unsqueeze(0).to(self.device)
         preds = self.model(preprocessed_plate)
-        return self._decode(preds)
+        return self._decode_with_confidence(preds)
 
-    def _decode(self, preds: torch.Tensor) -> str:
-        preds = preds.permute(1, 0, 2).argmax(dim=2)[0] # Упрощаем и берем первый элемент батча
-        decoded_seq = []
+    def _decode_with_confidence(self, log_probs: torch.Tensor) -> tuple[str, float]:
+        """Декодирует CTC-выход и возвращает текст и уверенность (0..1)."""
+        # log_probs: (seq_len, batch, num_classes)
+        probs = log_probs.permute(1, 0, 2)[0]  # (seq_len, num_classes)
+        time_steps = probs.size(0)
+
+        decoded_chars: list[str] = []
+        char_confidences: list[float] = []
         last_char_idx = 0
-        for char_idx in preds:
-            char_idx = char_idx.item()
+
+        for t in range(time_steps):
+            timestep_log_probs = probs[t]
+            char_idx = int(torch.argmax(timestep_log_probs).item())
+            char_conf = float(torch.exp(torch.max(timestep_log_probs)).item())
+
             if char_idx != 0 and char_idx != last_char_idx:
-                decoded_seq.append(self.int_to_char.get(char_idx, ''))
+                decoded_chars.append(self.int_to_char.get(char_idx, ''))
+                char_confidences.append(char_conf)
+
             last_char_idx = char_idx
-        return "".join(decoded_seq)
+
+        text = "".join(decoded_chars)
+        if not char_confidences:
+            return text, 0.0
+
+        # Усредняем уверенность по символам, чтобы штрафовать длинные шумные последовательности.
+        avg_confidence = sum(char_confidences) / len(char_confidences)
+        return text, avg_confidence
 
 class Visualizer:
     """Отвечает за отрисовку результатов."""
@@ -250,10 +269,17 @@ class TrackAggregator:
 class ANPR_Pipeline:
     """Главный класс, управляющий процессом распознавания."""
 
-    def __init__(self, recognizer: CRNNRecognizer, best_shots: int, cooldown_seconds: int = 0):
+    def __init__(
+        self,
+        recognizer: CRNNRecognizer,
+        best_shots: int,
+        cooldown_seconds: int = 0,
+        min_confidence: float = Config.OCR_CONFIDENCE_THRESHOLD,
+    ):
         self.recognizer = recognizer
         self.aggregator = TrackAggregator(best_shots)
         self.cooldown_seconds = max(0, cooldown_seconds)
+        self.min_confidence = max(0.0, min(1.0, min_confidence))
         self._last_seen: Dict[str, float] = {}
 
     def _on_cooldown(self, plate: str) -> bool:
@@ -316,8 +342,14 @@ class ANPR_Pipeline:
                 
                 if processed_plate.size > 0:
                     # 2. РАСПОЗНАЕМ
-                    current_text = self.recognizer.recognize(processed_plate)
-                    
+                    current_text, confidence = self.recognizer.recognize(processed_plate)
+
+                    if confidence < self.min_confidence:
+                        detection['text'] = "Нечитаемо"
+                        detection['unreadable'] = True
+                        detection['confidence'] = confidence
+                        continue
+
                     # 3. Агрегируем по треку или фиксируем напрямую для одиночных фото
                     if 'track_id' in detection:
                         detection['text'] = self.aggregator.add_result(
@@ -325,6 +357,8 @@ class ANPR_Pipeline:
                         )
                     else:  # Для одиночных фото
                         detection['text'] = current_text
+
+                    detection['confidence'] = confidence
 
                     if self.cooldown_seconds > 0 and detection.get('text'):
                         if self._on_cooldown(detection['text']):

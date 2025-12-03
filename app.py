@@ -28,13 +28,22 @@ class ChannelWorker(QtCore.QThread):
     event_ready = QtCore.pyqtSignal(dict)
     status_ready = QtCore.pyqtSignal(str, str)
 
-    def __init__(self, channel_conf: Dict, db_path: str, best_shots: int, cooldown_seconds: int, parent=None) -> None:
+    def __init__(
+        self,
+        channel_conf: Dict,
+        db_path: str,
+        best_shots: int,
+        cooldown_seconds: int,
+        min_confidence: float,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.channel_conf = channel_conf
         self.db_path = db_path
         self._running = True
         self.best_shots = best_shots
         self.cooldown_seconds = cooldown_seconds
+        self.min_confidence = min_confidence
 
     def _open_capture(self, source: str) -> Optional[cv2.VideoCapture]:
         capture = cv2.VideoCapture(int(source) if source.isnumeric() else source)
@@ -45,7 +54,15 @@ class ChannelWorker(QtCore.QThread):
     def _build_pipeline(self) -> Tuple[ANPR_Pipeline, YOLODetector]:
         detector = YOLODetector(ModelConfig.YOLO_MODEL_PATH, ModelConfig.DEVICE)
         recognizer = CRNNRecognizer(ModelConfig.OCR_MODEL_PATH, ModelConfig.DEVICE)
-        return ANPR_Pipeline(recognizer, self.best_shots, self.cooldown_seconds), detector
+        return (
+            ANPR_Pipeline(
+                recognizer,
+                self.best_shots,
+                self.cooldown_seconds,
+                min_confidence=self.min_confidence,
+            ),
+            detector,
+        )
 
     def run(self) -> None:
         try:
@@ -68,11 +85,13 @@ class ChannelWorker(QtCore.QThread):
                 results = pipeline.process_frame(frame, detections)
 
                 for res in results:
+                    if res.get("unreadable"):
+                        continue
                     if res.get("text"):
                         event = {
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "channel": self.channel_conf.get("name", "Канал"),
-                            "plate": res["text"],
+                            "plate": res.get("text", ""),
                             "confidence": res.get("confidence", 0.0),
                             "source": source,
                         }
@@ -213,12 +232,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_workers = []
         best_shots = self.settings.get_best_shots()
         cooldown = self.settings.get_cooldown_seconds()
+        min_confidence = self.settings.get_min_confidence()
         for channel_conf in self.settings.get_channels():
             worker = ChannelWorker(
                 channel_conf,
                 self.settings.get_db_path(),
                 best_shots,
                 cooldown,
+                min_confidence,
             )
             worker.frame_ready.connect(self._update_frame)
             worker.event_ready.connect(self._handle_event)
@@ -392,6 +413,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Интервал (в секундах), в течение которого не создается повторное событие для того же номера"
         )
         form_layout.addRow("Пауза повтора (сек):", self.cooldown_input)
+        self.min_conf_input = QtWidgets.QDoubleSpinBox()
+        self.min_conf_input.setRange(0.0, 1.0)
+        self.min_conf_input.setSingleStep(0.05)
+        self.min_conf_input.setDecimals(2)
+        self.min_conf_input.setValue(self.settings.get_min_confidence())
+        self.min_conf_input.setToolTip(
+            "Минимальная уверенность OCR (0-1) для приема результата; ниже — помечается как нечитаемое"
+        )
+        form_layout.addRow("Мин. уверенность OCR:", self.min_conf_input)
         self.channel_name_input = QtWidgets.QLineEdit()
         self.channel_source_input = QtWidgets.QLineEdit()
         form_layout.addRow("Название:", self.channel_name_input)
@@ -448,6 +478,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _save_channel(self) -> None:
         self.settings.save_best_shots(self.best_shots_input.value())
         self.settings.save_cooldown_seconds(self.cooldown_input.value())
+        self.settings.save_min_confidence(self.min_conf_input.value())
         index = self.channels_list.currentRow()
         channels = self.settings.get_channels()
         if 0 <= index < len(channels):
