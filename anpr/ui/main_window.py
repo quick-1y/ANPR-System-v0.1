@@ -18,13 +18,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, settings: Optional[SettingsManager] = None) -> None:
         super().__init__()
         self.setWindowTitle("ANPR Desktop")
-        self.resize(1280, 800)
+        self.resize(1380, 880)
 
         self.settings = settings or SettingsManager()
         self.db = EventDatabase(self.settings.get_db_path())
 
         self.channel_workers: List[ChannelWorker] = []
         self.channel_labels: Dict[str, QtWidgets.QLabel] = {}
+
+        self._apply_theme()
 
         self.tabs = QtWidgets.QTabWidget()
         self.monitor_tab = self._build_monitor_tab()
@@ -40,10 +42,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.tabs)
         self._refresh_events_table()
 
+    def _apply_theme(self) -> None:
+        """Настраивает базовую палитру и шрифты для более опрятного внешнего вида."""
+
+        base_palette = QtGui.QPalette()
+        base_palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#0f141a"))
+        base_palette.setColor(QtGui.QPalette.WindowText, QtGui.QColor("#e6e9ed"))
+        base_palette.setColor(QtGui.QPalette.Base, QtGui.QColor("#121821"))
+        base_palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#18202b"))
+        base_palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#f5f7fa"))
+        base_palette.setColor(QtGui.QPalette.Button, QtGui.QColor("#1c2430"))
+        base_palette.setColor(QtGui.QPalette.ButtonText, QtGui.QColor("#f5f7fa"))
+        base_palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#2f80ed"))
+        base_palette.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor("#f5f7fa"))
+        self.setPalette(base_palette)
+
+        font = QtGui.QFont()
+        font.setFamily("Segoe UI")
+        font.setPointSize(10)
+        self.setFont(font)
+
+        self.setStyleSheet(
+            """
+            QTabWidget::pane { border: 1px solid #1f2a38; border-radius: 6px; }
+            QTabBar::tab { background: #16202b; padding: 8px 12px; border-radius: 4px; margin: 2px; }
+            QTabBar::tab:selected { background: #2f80ed; color: #fff; }
+            QPushButton { background-color: #2f80ed; color: #fff; padding: 8px 14px; border-radius: 6px; }
+            QPushButton:hover { background-color: #4a94f3; }
+            QPushButton:pressed { background-color: #2568c4; }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QComboBox { 
+                background-color: #121821; 
+                border: 1px solid #243040; 
+                border-radius: 6px; 
+                padding: 6px; 
+                color: #f5f7fa; 
+            }
+            QTableWidget { border: 1px solid #1f2a38; border-radius: 6px; }
+            QHeaderView::section { background-color: #16202b; color: #cbd2dc; padding: 6px; border: none; }
+            QListWidget { background-color: #121821; border: 1px solid #1f2a38; border-radius: 6px; }
+            QLabel#subtitle { color: #9aa7b8; font-size: 12px; }
+            QLabel#heading { color: #f5f7fa; font-size: 14px; font-weight: 600; }
+            """
+        )
+
     # ------------------ Мониторинг ------------------
     def _build_monitor_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Сетка:"))
@@ -58,19 +105,46 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.start_button)
 
         controls.addStretch()
-        controls.addWidget(QtWidgets.QLabel("Последнее событие:"))
+
+        last_event_container = QtWidgets.QFrame()
+        last_event_container.setObjectName("lastEventContainer")
+        last_event_container.setStyleSheet(
+            "#lastEventContainer { background-color: #16202b; border: 1px solid #1f2a38; border-radius: 8px; padding: 10px; }"
+        )
+        last_layout = QtWidgets.QVBoxLayout(last_event_container)
+        heading = QtWidgets.QLabel("Последнее событие")
+        heading.setObjectName("heading")
         self.last_event_label = QtWidgets.QLabel("—")
-        controls.addWidget(self.last_event_label)
+        self.last_event_label.setObjectName("subtitle")
+        last_layout.addWidget(heading)
+        last_layout.addWidget(self.last_event_label)
+        last_layout.setContentsMargins(8, 2, 8, 2)
+        controls.addWidget(last_event_container)
 
         layout.addLayout(controls)
 
         self.grid_widget = QtWidgets.QWidget()
         self.grid_layout = QtWidgets.QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(6)
+        self.grid_layout.setSpacing(10)
         layout.addWidget(self.grid_widget)
 
         self._draw_grid()
         return widget
+
+    def _style_table(self, table: QtWidgets.QTableWidget) -> None:
+        """Единообразное оформление таблиц событий/поиска."""
+
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QtWidgets.QTableView.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        table.setShowGrid(False)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft)
+        table.setStyleSheet(
+            "QTableWidget::item { padding: 6px; }"
+            "QTableWidget::item:selected { background-color: #2f80ed; color: #ffffff; }"
+            "QTableCornerButton::section { background: #16202b; border: none; }"
+        )
 
     @staticmethod
     def _prepare_optional_datetime(widget: QtWidgets.QDateTimeEdit) -> None:
@@ -102,10 +176,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for col in range(cols):
                 label = QtWidgets.QLabel("Нет сигнала")
                 label.setAlignment(QtCore.Qt.AlignCenter)
+                label.setWordWrap(True)
                 label.setStyleSheet(
-                    "background-color: #1c1c1c; color: #ccc; border: 1px solid #444; padding: 4px;"
+                    "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a2533, stop:1 #0f1620);"
+                    "color: #dce2ec; border: 1px solid #1f2a38; border-radius: 10px; padding: 10px;"
                 )
-                label.setMinimumSize(220, 170)
+                label.setMinimumSize(240, 180)
                 label.setScaledContents(False)
                 label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
                 if index < len(channels):
@@ -206,6 +282,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ["Время", "Канал", "Номер", "Уверенность", "Источник"]
         )
         self.events_table.horizontalHeader().setStretchLastSection(True)
+        self._style_table(self.events_table)
         layout.addWidget(self.events_table)
 
         return widget
@@ -256,6 +333,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ["Время", "Канал", "Номер", "Уверенность", "Источник"]
         )
         self.search_table.horizontalHeader().setStretchLastSection(True)
+        self._style_table(self.search_table)
         layout.addWidget(self.search_table)
 
         return widget
@@ -283,10 +361,13 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(widget)
 
         self.channels_list = QtWidgets.QListWidget()
+        self.channels_list.setSpacing(4)
         self.channels_list.currentRowChanged.connect(self._load_channel_form)
         layout.addWidget(self.channels_list)
 
         form_layout = QtWidgets.QFormLayout()
+        form_layout.setHorizontalSpacing(16)
+        form_layout.setVerticalSpacing(10)
         self.best_shots_input = QtWidgets.QSpinBox()
         self.best_shots_input.setRange(1, 50)
         self.best_shots_input.setValue(self.settings.get_best_shots())
